@@ -1,13 +1,15 @@
 [package]
 name = "janusmap"
 version = "0.1.0"
-authors = ["Cristian Roman <romancristianv@proton.me>"]
 license = "MIT"
-edition = "2021"
+edition = "2024"
 repository = "https://github.com/someotherself/janusmap"
-description = "Lock free, concurrent hash map"
+description = "Experiment into concurrent hashmaps"
 readme = "README.md"
 keywords = ["concurrent", "hashmap"]
 categories = ["concurrency", "algorithms", "data-structures"]
 
 [dependencies]
+crossbeam = "0.8.4"
+parking_lot_core = "0.9.12"
+seize = "0.5.1"
