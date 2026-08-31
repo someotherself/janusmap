@@ -73,18 +73,20 @@ where
         // (such as fxhash) produce a usize result instead, which means that the
         // top 32 bits are 0 on 32-bit platforms.
         let top7 = hash >> (MIN_HASH_LEN * 8 - 7);
-        (top7 & 0x7f) as u8
+
+        // zero is reserved for empty slots
+        (top7 & 0x7f) as u8 + 1
     }
 }
 
-impl<'a, K: 'a + Eq + Hash, V: 'a + Clone, S: BuildHasher + Clone> JanusMap<K, V, S> {
+impl<K: Eq + Hash, V: Clone, S: BuildHasher + Clone> JanusMap<K, V, S> {
     fn new_inner(capacity: usize, hasher: S) -> JanusMap<K, V, S> {
         let base = DentTable::<K, V>::new(capacity);
         JanusMap { base, hasher }
     }
 
     pub fn with_hasher(hasher: S) -> Self {
-        JanusMap::with_capacity_and_hasher(4, hasher) // TODO: Cap is a placeholder
+        JanusMap::with_capacity_and_hasher(32, hasher)
     }
 
     pub fn with_capacity_and_hasher(capacity: usize, hasher: S) -> Self {
@@ -92,7 +94,7 @@ impl<'a, K: 'a + Eq + Hash, V: 'a + Clone, S: BuildHasher + Clone> JanusMap<K, V
     }
 
     // TODO: Verify that the guard belongs to this map
-    pub(crate) fn guard(&self) -> LocalGuard<'_> {
+    pub fn guard(&self) -> LocalGuard<'_> {
         self.base.collector.enter()
     }
 
@@ -124,25 +126,25 @@ impl<'a, K: 'a + Eq + Hash, V: 'a + Clone, S: BuildHasher + Clone> JanusMap<K, V
     //     }
     // }
 
-    pub fn get<'g, Q>(&'g self, key: &Q, guard: &'g LocalGuard<'g>) -> Option<ReadGuard<'g, V>>
+    pub fn get<'g, Q>(&self, key: &Q, guard: &'g LocalGuard<'_>) -> Option<ReadGuard<'g, V>>
     where
         K: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
     {
-        let (h1, h2) = self.hash(&key);
+        let (h1, h2) = self.hash(key);
         self.base.get(h1, h2, guard)
     }
 
     pub fn get_mut<'g, Q>(
         &'g self,
         key: &Q,
-        guard: &'g LocalGuard<'g>,
+        guard: &'g LocalGuard<'_>,
     ) -> Option<WriteGuard<'g, K, V>>
     where
         K: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
     {
-        let (h1, h2) = self.hash(&key);
+        let (h1, h2) = self.hash(key);
         self.base.get_mut(h1, h2, guard)
     }
 
@@ -151,7 +153,7 @@ impl<'a, K: 'a + Eq + Hash, V: 'a + Clone, S: BuildHasher + Clone> JanusMap<K, V
         K: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
     {
-        let (h1, h2) = self.hash(&key);
+        let (h1, h2) = self.hash(key);
         self.base.remove(h1, h2, guard)
     }
 }
@@ -184,7 +186,7 @@ impl<'a, V> Drop for ReadGuard<'a, V> {
 }
 
 // TODO
-// It should be possible to allow the entry to 
+// It should be possible to allow the entry to
 // get removed while write is active
 // But WriteGuard needs to hold both AtomicPtr<TableEntry> and *mut TableEntry
 // Then during drop check if AtomicPtr holds null
@@ -200,7 +202,7 @@ impl<'a, K, V> WriteGuard<'a, K, V> {
         &unsafe { &mut (*self.write_ptr) }.target
     }
 
-    fn as_mut_ref(&self) -> &mut V {
+    fn as_mut_ref(&mut self) -> &mut V {
         &mut unsafe { &mut (*self.write_ptr) }.target
     }
 }

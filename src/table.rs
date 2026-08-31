@@ -1,4 +1,3 @@
-
 #![allow(unused)]
 use std::{
     alloc::{Layout, handle_alloc_error},
@@ -252,7 +251,6 @@ impl<K, V> DentTable<K, V> {
             if write_ptr.is_null() {
                 // writer already active
                 // use parking_lot to wait?
-                eprintln!("Writer active");
                 write_ptr = entry_ref.access[1].swap(std::ptr::null_mut(), Ordering::Relaxed);
                 continue;
             }
@@ -283,7 +281,7 @@ impl<K, V> DentTable<K, V> {
             })
         };
 
-        return Some(value);
+        Some(value)
     }
 
     #[inline]
@@ -339,16 +337,14 @@ impl<K, V> DentTable<K, V> {
                     if unsafe { &(*write_ptr) }.readers.load(Ordering::Relaxed) != 0 {
                         // Relaxed is probably not correct here
                         // TODO: use parking_lot to wait?
-                        entry_ref.access[1].swap(write_ptr, Ordering::Relaxed);
                         continue;
                     }
-                    readers = &unsafe { &(*write_ptr) }.readers;
                     break;
                 }
 
                 return Some(WriteGuard {
                     write_ptr,
-                    slot: slot,
+                    slot,
                     _keep_alive: PhantomData,
                 });
             } else if short_hash == 0 {
@@ -365,7 +361,7 @@ impl<K, V> DentTable<K, V> {
 
     #[inline]
     pub(crate) fn get<'g>(
-        &'g self,
+        &self,
         h1: usize,
         h2: u8,
         guard: &'g LocalGuard<'_>,
@@ -440,7 +436,6 @@ impl<K, V> DentTable<K, V> {
 
         loop {
             let short_hash = self.get_short_hash(probe.i).load(Ordering::Acquire);
-
             if short_hash == 0 {
                 // slot is empty
                 // entry already exists
@@ -698,7 +693,7 @@ impl<K, V> TableEntry<K, V> {
             let left = (*entry).targets[0].get();
             let right = (*entry).targets[1].get();
 
-            let v = std::ptr::read((left)).target;
+            let v = std::ptr::read(left).target;
             std::ptr::drop_in_place(right);
 
             std::alloc::dealloc(entry.cast::<u8>(), layout);
