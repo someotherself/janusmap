@@ -250,7 +250,7 @@ impl<K, V, S> DentTable<K, V, S> {
             let short_hash = Self::short_hash(table, probe.i);
 
             if short_hash == h2 {
-                match self.remove_entry(self.get_entry(probe.i), key, h1, guard) {
+                match self.remove_entry(self.get_entry(probe.i), key, guard) {
                     Some(val) => {
                         self.len.fetch_sub(1, Ordering::Relaxed);
                         Self::store_short_hash(table, probe.i, hash_metadata::TOMBSTONE_SLOT);
@@ -277,7 +277,6 @@ impl<K, V, S> DentTable<K, V, S> {
         &self,
         slot: &AtomicPtr<TableEntry<K, V>>,
         key: &Q,
-        h1: usize,
         guard: &LocalGuard<'_>,
     ) -> Option<V>
     where
@@ -292,7 +291,7 @@ impl<K, V, S> DentTable<K, V, S> {
         }
 
         let entry_ref = unsafe { &(*entry_ptr) };
-        if entry_ref.key.borrow() != key || entry_ref.hash != h1 {
+        if entry_ref.key.borrow() != key {
             return None;
         }
 
@@ -366,7 +365,7 @@ impl<K, V, S> DentTable<K, V, S> {
                 }
 
                 let entry_ref = unsafe { &(*entry_ptr) };
-                if entry_ref.key.borrow() != key || entry_ref.hash != h1 {
+                if entry_ref.key.borrow() != key {
                     // Entry does not match
                     probe.next(Self::mask(table));
                     continue;
@@ -444,7 +443,7 @@ impl<K, V, S> DentTable<K, V, S> {
                 }
 
                 let entry_ref = unsafe { &(*entry_ptr) };
-                if entry_ref.key.borrow() != key || entry_ref.hash != h1 {
+                if entry_ref.key.borrow() != key {
                     // Entry does not match
                     probe.next(mask);
                     continue;
@@ -520,7 +519,7 @@ impl<K, V, S> DentTable<K, V, S> {
             } else if short_hash == h2 {
                 let v = value.unwrap();
                 let k = key.unwrap();
-                match self.insert_replace(self.get_entry(probe.i), &k, v, true, h1) {
+                match self.insert_replace(self.get_entry(probe.i), &k, v, true) {
                     InsertReplace::Failed { v } => {
                         value = Some(v);
                         key = Some(k);
@@ -580,7 +579,6 @@ impl<K, V, S> DentTable<K, V, S> {
         key: &K,
         value: V,
         replace: bool,
-        h1: usize,
     ) -> InsertReplace<V>
     where
         K: Eq,
@@ -593,7 +591,7 @@ impl<K, V, S> DentTable<K, V, S> {
         }
 
         let entry_ref = unsafe { &(*entry_ptr) };
-        if entry_ref.key != *key || entry_ref.hash != h1 {
+        if entry_ref.key != *key {
             return InsertReplace::Failed { v: value };
         };
         if !replace {
