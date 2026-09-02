@@ -250,7 +250,7 @@ impl<K, V, S> DentTable<K, V, S> {
             let short_hash = Self::short_hash(table, probe.i);
 
             if short_hash == h2 {
-                match self.remove_entry(self.get_entry(probe.i), key, guard) {
+                match self.remove_entry(self.get_entry(table, probe.i), key, guard) {
                     Some(val) => {
                         self.len.fetch_sub(1, Ordering::Relaxed);
                         Self::store_short_hash(table, probe.i, hash_metadata::TOMBSTONE_SLOT);
@@ -284,7 +284,7 @@ impl<K, V, S> DentTable<K, V, S> {
         Q: Hash + Eq + ?Sized,
         V: Clone,
     {
-        let entry_ptr = slot.load(Ordering::Acquire);
+        let entry_ptr = slot.load(Ordering::Relaxed);
         if entry_ptr.is_null() {
             // Another thread has removed the entry
             return None;
@@ -354,9 +354,9 @@ impl<K, V, S> DentTable<K, V, S> {
             let short_hash = Self::short_hash(table, probe.i);
 
             if short_hash == h2 {
-                let slot = self.get_entry(probe.i);
+                let slot = self.get_entry(table, probe.i);
 
-                let entry_ptr = guard.protect(slot, Ordering::Acquire);
+                let entry_ptr = guard.protect(slot, Ordering::Relaxed);
 
                 if entry_ptr.is_null() {
                     // Entry was removed by another thread
@@ -432,7 +432,7 @@ impl<K, V, S> DentTable<K, V, S> {
             let short_hash = Self::short_hash(table, probe.i);
 
             if short_hash == h2 {
-                let slot = self.get_entry(probe.i);
+                let slot = self.get_entry(table, probe.i);
 
                 let entry_ptr = guard.protect(slot, Ordering::Acquire);
 
@@ -458,7 +458,7 @@ impl<K, V, S> DentTable<K, V, S> {
                 // Increment the read count
                 unsafe { &*read_ptr }
                     .readers
-                    .fetch_add(1, Ordering::Release);
+                    .fetch_add(1, Ordering::Relaxed);
 
                 return Some(ReadGuard {
                     entry: read_ptr,
@@ -519,7 +519,7 @@ impl<K, V, S> DentTable<K, V, S> {
             } else if short_hash == h2 {
                 let v = value.unwrap();
                 let k = key.unwrap();
-                match self.insert_replace(self.get_entry(probe.i), &k, v, true) {
+                match self.insert_replace(self.get_entry(table, probe.i), &k, v, true) {
                     InsertReplace::Failed { v } => {
                         value = Some(v);
                         key = Some(k);
@@ -551,14 +551,14 @@ impl<K, V, S> DentTable<K, V, S> {
     where
         V: Clone,
     {
-        let fresh_entry = self.get_entry(slot);
+        let fresh_entry = self.get_entry(table, slot);
         let new_entry = TableEntry::new(key, h1, value);
 
         match fresh_entry.compare_exchange(
             std::ptr::null_mut(),
             new_entry,
             Ordering::AcqRel,
-            Ordering::Acquire,
+            Ordering::Relaxed,
         ) {
             Ok(_) => {
                 Self::store_short_hash(table, slot, h2);
@@ -584,7 +584,7 @@ impl<K, V, S> DentTable<K, V, S> {
         K: Eq,
         V: Clone,
     {
-        let entry_ptr = slot.load(Ordering::Acquire);
+        let entry_ptr = slot.load(Ordering::Relaxed);
         if entry_ptr.is_null() {
             // Another thread has removed the entry
             return InsertReplace::Failed { v: value };
@@ -643,9 +643,8 @@ impl<K, V, S> DentTable<K, V, S> {
     }
 
     #[inline]
-    pub fn get_entry(&self, i: usize) -> &AtomicPtr<TableEntry<K, V>> {
-        let ptr = self.inner.load(Ordering::Acquire);
-        let entries = self.entries_ptr(ptr);
+    pub fn get_entry(&self, table: *mut RawTable<K, V>, i: usize) -> &AtomicPtr<TableEntry<K, V>> {
+        let entries = self.entries_ptr(table);
 
         unsafe { &*entries.add(i) }
     }
@@ -698,7 +697,7 @@ pub(crate) struct TrackingEntry<V> {
 
 impl<V> TrackingEntry<V> {
     pub(crate) fn drop_reader(&self) {
-        self.readers.fetch_sub(1, Ordering::Release);
+        self.readers.fetch_sub(1, Ordering::Relaxed);
     }
 }
 

@@ -157,7 +157,7 @@ impl<'a, V> Drop for ReadGuard<'a, V> {
 pub struct WriteGuard<'a, K, V> {
     // We are the only owner of this pointer and data behind it
     write_ptr: *mut TrackingEntry<V>,
-    slot: *mut TableEntry<K, V>, // TODO: Store *mut instead?
+    slot: *mut TableEntry<K, V>,
     _keep_alive: PhantomData<&'a ()>,
 }
 
@@ -190,12 +190,14 @@ impl<'a, K, V> Drop for WriteGuard<'a, K, V> {
         // self.slot is guaranteed to be non-null for as long as we have write access
         let old_read_ptr =
             unsafe { &(*self.slot) }.access[0].swap(self.write_ptr, Ordering::Release);
-        unsafe { &(*self.slot) }.access[1].store(old_read_ptr, Ordering::Release);
+        unsafe { &(*self.slot) }.access[1].store(old_read_ptr, Ordering::Relaxed);
     }
 }
 
 #[cfg(test)]
 mod test {
+    use std::sync::Arc;
+
     use crate::JanusMap;
 
     #[test]
@@ -222,7 +224,7 @@ mod test {
     }
 
     #[test]
-    fn insert_get_remove_test() {
+    fn insert_get_remove_test_70k() {
         let map = JanusMap::<u64, u64>::with_capacity(100_000);
         let guard = map.guard();
 
@@ -247,5 +249,167 @@ mod test {
         }
 
         assert_eq!(map.len(), 0);
+    }
+
+    #[test]
+    fn insert_get_remove_test_50k() {
+        let map = JanusMap::<u64, u64>::with_capacity(100_000);
+        let guard = map.guard();
+
+        for id in 0..50_000 {
+            map.insert(id, id, &guard);
+        }
+        assert_eq!(map.len(), 50_000);
+
+        for id in 0..50_000 {
+            let read = map.get(&id, &guard).unwrap();
+            assert_eq!(read.as_ref(), &id);
+        }
+
+        for id in 0..50_000 {
+            let writer = map.get_mut(&id, &guard).unwrap();
+            assert_eq!(writer.as_ref(), &id);
+        }
+
+        for id in 0..50_000 {
+            let old = map.remove(&id, &guard).unwrap();
+            assert_eq!(old, id);
+        }
+
+        assert_eq!(map.len(), 0);
+    }
+
+    #[test]
+    fn insert_get_remove_test_20k() {
+        let map = JanusMap::<u64, u64>::with_capacity(100_000);
+        let guard = map.guard();
+
+        for id in 0..20_000 {
+            map.insert(id, id, &guard);
+        }
+        assert_eq!(map.len(), 20_000);
+
+        for id in 0..20_000 {
+            let read = map.get(&id, &guard).unwrap();
+            assert_eq!(read.as_ref(), &id);
+        }
+
+        for id in 0..20_000 {
+            let writer = map.get_mut(&id, &guard).unwrap();
+            assert_eq!(writer.as_ref(), &id);
+        }
+
+        for id in 0..20_000 {
+            let old = map.remove(&id, &guard).unwrap();
+            assert_eq!(old, id);
+        }
+
+        assert_eq!(map.len(), 0);
+    }
+
+    #[test]
+    fn insert_get_remove_test_80k_4_threads() {
+        let map = Arc::new(JanusMap::<u64, u64>::with_capacity(100_000));
+
+        let map1 = map.clone();
+        let join1 = std::thread::spawn(move || {
+            let guard = map1.guard();
+
+            for id in 0..20_000 {
+                map1.insert(id, id, &guard);
+            }
+
+            for id in 0..20_000 {
+                let read = map1.get(&id, &guard).unwrap();
+                assert_eq!(read.as_ref(), &id);
+            }
+
+            for id in 0..20_000 {
+                let writer = map1.get_mut(&id, &guard).unwrap();
+                assert_eq!(writer.as_ref(), &id);
+            }
+
+            for id in 0..20_000 {
+                let old = map1.remove(&id, &guard).unwrap();
+                assert_eq!(old, id);
+            }
+        });
+
+        let map2 = map.clone();
+        let join2 = std::thread::spawn(move || {
+            let guard = map2.guard();
+
+            for id in 0..20_000 {
+                map2.insert(id * 10, id, &guard);
+            }
+
+            for id in 0..20_000 {
+                let read = map2.get(&(id * 10), &guard).unwrap();
+                assert_eq!(read.as_ref(), &id);
+            }
+
+            for id in 0..20_000 {
+                let writer = map2.get_mut(&(id * 10), &guard).unwrap();
+                assert_eq!(writer.as_ref(), &id);
+            }
+
+            for id in 0..20_000 {
+                let old = map2.remove(&(id * 10), &guard).unwrap();
+                assert_eq!(old, id);
+            }
+        });
+
+        let map3 = map.clone();
+        let join3 = std::thread::spawn(move || {
+            let guard = map3.guard();
+
+            for id in 0..20_000 {
+                map3.insert(id * 100, id, &guard);
+            }
+
+            for id in 0..20_000 {
+                let read = map3.get(&(id * 100), &guard).unwrap();
+                assert_eq!(read.as_ref(), &id);
+            }
+
+            for id in 0..20_000 {
+                let writer = map3.get_mut(&(id * 100), &guard).unwrap();
+                assert_eq!(writer.as_ref(), &id);
+            }
+
+            for id in 0..20_000 {
+                let old = map3.remove(&(id * 100), &guard).unwrap();
+                assert_eq!(old, id);
+            }
+        });
+
+        let map4 = map.clone();
+        let join4 = std::thread::spawn(move || {
+            let guard = map4.guard();
+
+            for id in 0..20_000 {
+                map4.insert(id * 1000, id, &guard);
+            }
+
+            for id in 0..20_000 {
+                let read = map4.get(&(id * 1000), &guard).unwrap();
+                assert_eq!(read.as_ref(), &id);
+            }
+
+            for id in 0..20_000 {
+                let writer = map4.get_mut(&(id * 1000), &guard).unwrap();
+                assert_eq!(writer.as_ref(), &id);
+            }
+
+            for id in 0..20_000 {
+                let old = map4.remove(&(id * 1000), &guard).unwrap();
+                assert_eq!(old, id);
+            }
+        });
+
+        let _ = join1.join();
+        let _ = join2.join();
+        let _ = join3.join();
+        let _ = join4.join();
     }
 }
