@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use std::{
     borrow::Borrow,
     hash::{BuildHasher, Hash, RandomState},
@@ -174,9 +172,22 @@ pub enum TryInsertError {
 }
 
 pub struct ReadGuard<'a, V> {
-    value: &'a V,
     entry: *mut TrackingEntry<V>,
     _keep_alive: PhantomData<&'a ()>,
+}
+
+impl<'a, V> ReadGuard<'a, V> {
+    fn as_ref(&self) -> &V {
+        &unsafe { &mut (*self.entry) }.target
+    }
+}
+
+impl<'a, V> Deref for ReadGuard<'a, V> {
+    type Target = V;
+
+    fn deref(&self) -> &Self::Target {
+        self.as_ref()
+    }
 }
 
 impl<'a, V> Drop for ReadGuard<'a, V> {

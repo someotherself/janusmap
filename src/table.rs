@@ -1,15 +1,12 @@
-#![allow(unused)]
 use std::{
     alloc::{Layout, handle_alloc_error},
     cell::UnsafeCell,
     marker::PhantomData,
     mem::MaybeUninit,
-    rc::Rc,
     sync::atomic::{AtomicPtr, AtomicU8, AtomicU16, AtomicUsize, Ordering},
 };
 
 use crossbeam::utils::CachePadded;
-use parking_lot_core::{DEFAULT_PARK_TOKEN, DEFAULT_UNPARK_TOKEN};
 use seize::{Collector, Guard, LocalGuard};
 
 use crate::{
@@ -25,38 +22,37 @@ pub(crate) mod hash_metadata {
     pub const TOMBSTONE_SLOT: u8 = 0x80;
 }
 
-const MIN_CAPACITY: usize = 16;
-
 pub struct DentTable<K, V> {
     pub(crate) len: CachePadded<AtomicUsize>,
+    #[allow(unused)]
     pub(crate) capacity: usize,
     pub(crate) collector: Collector,
     pub(crate) inner: AtomicPtr<RawTable<K, V>>,
 }
 
-#[repr(transparent)]
-pub struct MapGuard<G>(G);
+// #[repr(transparent)]
+// pub struct MapGuard<G>(G);
 
-impl<G> MapGuard<G> {
-    /// Create a new `MapGuard`.
-    ///
-    /// # Safety
-    ///
-    /// The guard must be valid to use with the given map.
-    pub unsafe fn new(guard: G) -> MapGuard<G> {
-        MapGuard(guard)
-    }
+// impl<G> MapGuard<G> {
+//     /// Create a new `MapGuard`.
+//     ///
+//     /// # Safety
+//     ///
+//     /// The guard must be valid to use with the given map.
+//     pub unsafe fn new(guard: G) -> MapGuard<G> {
+//         MapGuard(guard)
+//     }
 
-    /// Create a new `MapGuard` from a reference.
-    ///
-    /// # Safety
-    ///
-    /// The guard must be valid to use with the given map.
-    pub unsafe fn from_ref(guard: &G) -> &MapGuard<G> {
-        // Safety: `VerifiedGuard` is `repr(transparent)` over `G`.
-        unsafe { &*(guard as *const G as *const MapGuard<G>) }
-    }
-}
+//     /// Create a new `MapGuard` from a reference.
+//     ///
+//     /// # Safety
+//     ///
+//     /// The guard must be valid to use with the given map.
+//     pub unsafe fn from_ref(guard: &G) -> &MapGuard<G> {
+//         // Safety: `VerifiedGuard` is `repr(transparent)` over `G`.
+//         unsafe { &*(guard as *const G as *const MapGuard<G>) }
+//     }
+// }
 
 impl<K, V> DentTable<K, V> {
     #[inline]
@@ -172,7 +168,6 @@ impl<K, V> DentTable<K, V> {
             for i in 0..capacity {
                 std::ptr::write(entries.add(i), AtomicPtr::new(std::ptr::null_mut()));
             }
-            let a = entries;
         }
 
         table
@@ -271,7 +266,7 @@ impl<K, V> DentTable<K, V> {
 
         // Swap out the entry entirely and then put back the write ptr
 
-        let mut removed_slot = slot.swap(std::ptr::null_mut(), Ordering::Relaxed);
+        let removed_slot = slot.swap(std::ptr::null_mut(), Ordering::Relaxed);
 
         if write_ptr.is_null() {
             // Already removed. Is it even possible at this point?
@@ -279,7 +274,7 @@ impl<K, V> DentTable<K, V> {
             return None;
         }
 
-        let value = unsafe { (&*write_ptr) }.target.clone();
+        let value = unsafe { &*write_ptr }.target.clone();
 
         unsafe { &(*removed_slot) }.access[1].store(write_ptr, Ordering::Relaxed);
 
@@ -341,9 +336,9 @@ impl<K, V> DentTable<K, V> {
 
                 // We have a write lock
                 // Check and wait for any active readers
-                let mut readers = &unsafe { &(*write_ptr) }.readers;
+                let readers = &unsafe { &(*write_ptr) }.readers;
                 loop {
-                    if unsafe { &(*write_ptr) }.readers.load(Ordering::Relaxed) != 0 {
+                    if readers.load(Ordering::Relaxed) != 0 {
                         // Relaxed is probably not correct here
                         // TODO: use parking_lot to wait?
                         continue;
@@ -405,13 +400,11 @@ impl<K, V> DentTable<K, V> {
                 debug_assert!(!read_ptr.is_null());
 
                 // Increment the read count
-                unsafe { (&*read_ptr) }
+                unsafe { &*read_ptr }
                     .readers
                     .fetch_add(1, Ordering::Release);
-                let value = &unsafe { (&*read_ptr) }.target;
 
                 return Some(ReadGuard {
-                    value,
                     entry: read_ptr,
                     _keep_alive: PhantomData,
                 });
@@ -434,7 +427,7 @@ impl<K, V> DentTable<K, V> {
         h1: usize,
         h2: u8,
         value: V,
-        replace: bool,
+        _replace: bool,
         guard: &impl Guard,
     ) -> InsertResult<V>
     where
@@ -557,7 +550,7 @@ impl<K, V> DentTable<K, V> {
             // We have a write lock
             // Check and wait for any active readers
             let readers = &unsafe { &(*write_ptr) }.readers;
-            if unsafe { &(*write_ptr) }.readers.load(Ordering::Relaxed) != 0 {
+            if readers.load(Ordering::Relaxed) != 0 {
                 // Relaxed is probably not correct here
                 // TODO: use parking_lot to wait?
                 entry_ref.access[1].swap(write_ptr, Ordering::Relaxed);
@@ -565,7 +558,7 @@ impl<K, V> DentTable<K, V> {
             }
 
             let old_value = &mut unsafe { &mut (*write_ptr) }.target;
-            let mut value = value;
+            let value = value;
             let old = std::mem::replace(old_value, value);
 
             // Swap the write ptr with the read ptr. New value will not be available to readers
@@ -687,10 +680,6 @@ impl<K, V> TableEntry<K, V> {
             std::ptr::addr_of_mut!((*entry).access)
                 .write([AtomicPtr::new(left), AtomicPtr::new(right)]);
         }
-
-        let access_ptr = unsafe { std::ptr::addr_of_mut!((*entry).access[1]) };
-        let write_ptr = unsafe { &(*access_ptr) }.load(Ordering::Relaxed);
-        let write_readers_ptr = unsafe { std::ptr::addr_of_mut!((*write_ptr).readers) };
 
         entry
     }

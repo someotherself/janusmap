@@ -36,6 +36,7 @@ pub fn limit(capacity: usize) -> usize {
     5 * ((usize::BITS as usize) - (capacity.leading_zeros() as usize) - 1)
 }
 
+#[allow(unused)]
 // Returns an estimate of the number of entries needed to hold `capacity` elements.
 pub fn entries_for(capacity: usize) -> usize {
     // We should rarely resize before 75%.
