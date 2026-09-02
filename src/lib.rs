@@ -14,8 +14,7 @@ pub(crate) mod probe;
 pub(crate) mod table;
 
 pub struct JanusMap<K, V, S = RandomState> {
-    base: DentTable<K, V>,
-    hasher: S,
+    base: DentTable<K, V, S>,
 }
 
 impl<K, V, S> Default for JanusMap<K, V, S>
@@ -35,52 +34,10 @@ impl<K: Eq + Hash, V: Clone> JanusMap<K, V, RandomState> {
     }
 }
 
-impl<K, V, S> JanusMap<K, V, S>
-where
-    K: Hash + Eq,
-    S: BuildHasher,
-{
-    /// Returns the h1 and h2 hash for the given key.
-    #[inline]
-    fn hash<Q>(&self, key: &Q) -> (usize, u8)
-    where
-        Q: Hash + ?Sized,
-    {
-        let hash = self.hasher.hash_one(key);
-        (Self::h1(hash), Self::h2(hash))
-    }
-
-    // Returns the primary hash for an entry.
-    #[inline]
-    fn h1(hash: u64) -> usize {
-        hash as usize
-    }
-
-    /// Return a byte of hash metadata, used for cheap searches.
-    #[inline]
-    fn h2(hash: u64) -> u8 {
-        const MIN_HASH_LEN: usize = if std::mem::size_of::<usize>() < std::mem::size_of::<u64>() {
-            std::mem::size_of::<usize>()
-        } else {
-            std::mem::size_of::<u64>()
-        };
-
-        // Grab the top 7 bits of the hash.
-        //
-        // While the hash is normally a full 64-bit value, some hash functions
-        // (such as fxhash) produce a usize result instead, which means that the
-        // top 32 bits are 0 on 32-bit platforms.
-        let top7 = hash >> (MIN_HASH_LEN * 8 - 7);
-
-        // zero is reserved for empty slots
-        (top7 & 0x7f) as u8 + 1
-    }
-}
-
 impl<K: Eq + Hash, V: Clone, S: BuildHasher + Clone> JanusMap<K, V, S> {
     fn new_inner(capacity: usize, hasher: S) -> JanusMap<K, V, S> {
-        let base = DentTable::<K, V>::new(capacity);
-        JanusMap { base, hasher }
+        let base = DentTable::<K, V, S>::new(capacity, hasher);
+        JanusMap { base }
     }
 
     pub fn with_hasher(hasher: S) -> Self {
@@ -105,8 +62,7 @@ impl<K: Eq + Hash, V: Clone, S: BuildHasher + Clone> JanusMap<K, V, S> {
     }
 
     pub fn insert(&self, key: K, value: V, guard: &LocalGuard<'_>) -> Option<V> {
-        let (h1, h2) = self.hash(&key);
-        match self.base.insert(key, h1, h2, value, true, guard) {
+        match self.base.insert(key, value, true, guard) {
             InsertResult::Inserted => None,
             InsertResult::Replaced(val) => Some(val),
             InsertResult::Error => {
@@ -129,8 +85,7 @@ impl<K: Eq + Hash, V: Clone, S: BuildHasher + Clone> JanusMap<K, V, S> {
         K: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
     {
-        let (h1, h2) = self.hash(key);
-        self.base.get(h1, h2, guard)
+        self.base.get(key, guard)
     }
 
     pub fn get_mut<'g, Q>(
@@ -142,8 +97,7 @@ impl<K: Eq + Hash, V: Clone, S: BuildHasher + Clone> JanusMap<K, V, S> {
         K: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
     {
-        let (h1, h2) = self.hash(key);
-        self.base.get_mut(h1, h2, guard)
+        self.base.get_mut(key, guard)
     }
 
     pub fn remove<Q>(&self, key: &Q, guard: &LocalGuard<'_>) -> Option<V>
@@ -151,8 +105,7 @@ impl<K: Eq + Hash, V: Clone, S: BuildHasher + Clone> JanusMap<K, V, S> {
         K: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
     {
-        let (h1, h2) = self.hash(key);
-        self.base.remove(h1, h2, guard)
+        self.base.remove(key, guard)
     }
 }
 
@@ -162,7 +115,7 @@ impl<K, V, S> Drop for JanusMap<K, V, S> {
         if table.is_null() {
             return;
         }
-        DentTable::deallocate(table);
+        DentTable::<K, V, S>::deallocate(table);
     }
 }
 
@@ -267,5 +220,33 @@ mod test {
         // eprintln!("length: {}", map.len());
         // map.insert(2, "aaa".into());
         // eprintln!("length: {}", map.len());
+    }
+
+    #[test]
+    fn insert_get_remove_test() {
+        let map = JanusMap::<u64, u64>::with_capacity(100_000);
+        let guard = map.guard();
+
+        for id in 0..70_000 {
+            map.insert(id, id, &guard);
+        }
+        assert_eq!(map.len(), 70_000);
+
+        for id in 0..70_000 {
+            let read = map.get(&id, &guard).unwrap();
+            assert_eq!(read.as_ref(), &id);
+        }
+
+        for id in 0..70_000 {
+            let writer = map.get_mut(&id, &guard).unwrap();
+            assert_eq!(writer.as_ref(), &id);
+        }
+
+        for id in 0..70_000 {
+            let old = map.remove(&id, &guard).unwrap();
+            assert_eq!(old, id);
+        }
+
+        assert_eq!(map.len(), 0);
     }
 }

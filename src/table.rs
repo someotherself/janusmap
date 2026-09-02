@@ -1,6 +1,8 @@
 use std::{
     alloc::{Layout, handle_alloc_error},
+    borrow::Borrow,
     cell::UnsafeCell,
+    hash::{BuildHasher, Hash, RandomState},
     marker::PhantomData,
     mem::MaybeUninit,
     sync::atomic::{AtomicPtr, AtomicU8, AtomicU16, AtomicUsize, Ordering},
@@ -22,11 +24,12 @@ pub(crate) mod hash_metadata {
     pub const TOMBSTONE_SLOT: u8 = 0x80;
 }
 
-pub struct DentTable<K, V> {
+pub struct DentTable<K, V, S = RandomState> {
     pub(crate) len: CachePadded<AtomicUsize>,
     #[allow(unused)]
     pub(crate) capacity: usize,
     pub(crate) collector: Collector,
+    pub(crate) hasher: S,
     pub(crate) inner: AtomicPtr<RawTable<K, V>>,
 }
 
@@ -54,9 +57,46 @@ pub struct DentTable<K, V> {
 //     }
 // }
 
-impl<K, V> DentTable<K, V> {
+impl<K, V, S> DentTable<K, V, S> {
+    /// Returns the h1 and h2 hash for the given key.
     #[inline]
-    pub fn new(capacity: usize) -> DentTable<K, V>
+    fn hash<Q>(&self, key: &Q) -> (usize, u8)
+    where
+        Q: Hash + ?Sized,
+        S: BuildHasher + Clone,
+    {
+        let hash = self.hasher.hash_one(key);
+        (Self::h1(hash), Self::h2(hash))
+    }
+
+    // Returns the primary hash for an entry.
+    #[inline]
+    fn h1(hash: u64) -> usize {
+        hash as usize
+    }
+
+    /// Return a byte of hash metadata, used for cheap searches.
+    #[inline]
+    fn h2(hash: u64) -> u8 {
+        const MIN_HASH_LEN: usize = if std::mem::size_of::<usize>() < std::mem::size_of::<u64>() {
+            std::mem::size_of::<usize>()
+        } else {
+            std::mem::size_of::<u64>()
+        };
+
+        // Grab the top 7 bits of the hash.
+        //
+        // While the hash is normally a full 64-bit value, some hash functions
+        // (such as fxhash) produce a usize result instead, which means that the
+        // top 32 bits are 0 on 32-bit platforms.
+        let top7 = hash >> (MIN_HASH_LEN * 8 - 7);
+
+        // zero is reserved for empty slots
+        (top7 & 0x7f) as u8 + 1
+    }
+
+    #[inline]
+    pub fn new(capacity: usize, hasher: S) -> DentTable<K, V, S>
     where
         V: Clone,
     {
@@ -73,6 +113,7 @@ impl<K, V> DentTable<K, V> {
             len: CachePadded::new(AtomicUsize::new(0)),
             capacity,
             collector: Collector::new(),
+            hasher,
             inner: AtomicPtr::new(table),
         }
     }
@@ -193,10 +234,14 @@ impl<K, V> DentTable<K, V> {
     }
 
     #[inline]
-    pub(crate) fn remove(&self, h1: usize, h2: u8, guard: &LocalGuard<'_>) -> Option<V>
+    pub(crate) fn remove<Q>(&self, key: &Q, guard: &LocalGuard<'_>) -> Option<V>
     where
         V: Clone,
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+        S: BuildHasher + Clone,
     {
+        let (h1, h2) = self.hash(key);
         let table = self.root(guard);
         let mask = Self::mask(table);
         let mut probe = Probe::start(h1, mask);
@@ -205,7 +250,7 @@ impl<K, V> DentTable<K, V> {
             let short_hash = Self::short_hash(table, probe.i);
 
             if short_hash == h2 {
-                match self.remove_entry(self.get_entry(probe.i), h1, guard) {
+                match self.remove_entry(self.get_entry(probe.i), key, h1, guard) {
                     Some(val) => {
                         self.len.fetch_sub(1, Ordering::Relaxed);
                         Self::store_short_hash(table, probe.i, hash_metadata::TOMBSTONE_SLOT);
@@ -228,22 +273,26 @@ impl<K, V> DentTable<K, V> {
     }
 
     #[inline]
-    fn remove_entry(
+    fn remove_entry<Q>(
         &self,
         slot: &AtomicPtr<TableEntry<K, V>>,
+        key: &Q,
         h1: usize,
         guard: &LocalGuard<'_>,
     ) -> Option<V>
     where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
         V: Clone,
     {
-        let slot_ptr = slot.load(Ordering::Acquire);
-        if slot_ptr.is_null() {
+        let entry_ptr = slot.load(Ordering::Acquire);
+        if entry_ptr.is_null() {
             // Another thread has removed the entry
             return None;
         }
-        let entry_ref = unsafe { &(*slot_ptr) };
-        if entry_ref.hash != h1 {
+
+        let entry_ref = unsafe { &(*entry_ptr) };
+        if entry_ref.key.borrow() != key || entry_ref.hash != h1 {
             return None;
         }
 
@@ -288,12 +337,17 @@ impl<K, V> DentTable<K, V> {
     }
 
     #[inline]
-    pub(crate) fn get_mut<'g>(
+    pub(crate) fn get_mut<'g, Q>(
         &'g self,
-        h1: usize,
-        h2: u8,
+        key: &Q,
         guard: &'g LocalGuard<'_>,
-    ) -> Option<WriteGuard<'g, K, V>> {
+    ) -> Option<WriteGuard<'g, K, V>>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+        S: BuildHasher + Clone,
+    {
+        let (h1, h2) = self.hash(key);
         let table = self.root(guard);
 
         let mut probe = Probe::start(h1, Self::mask(table));
@@ -311,7 +365,8 @@ impl<K, V> DentTable<K, V> {
                     continue;
                 }
 
-                if unsafe { (*entry_ptr).hash } != h1 {
+                let entry_ref = unsafe { &(*entry_ptr) };
+                if entry_ref.key.borrow() != key || entry_ref.hash != h1 {
                     // Entry does not match
                     probe.next(Self::mask(table));
                     continue;
@@ -364,12 +419,13 @@ impl<K, V> DentTable<K, V> {
     }
 
     #[inline]
-    pub(crate) fn get<'g>(
-        &self,
-        h1: usize,
-        h2: u8,
-        guard: &'g LocalGuard<'_>,
-    ) -> Option<ReadGuard<'g, V>> {
+    pub(crate) fn get<'g, Q>(&self, key: &Q, guard: &'g LocalGuard<'_>) -> Option<ReadGuard<'g, V>>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+        S: BuildHasher + Clone,
+    {
+        let (h1, h2) = self.hash(key);
         let table = self.root(guard);
         let mask = Self::mask(table);
         let mut probe = Probe::start(h1, mask);
@@ -387,7 +443,8 @@ impl<K, V> DentTable<K, V> {
                     continue;
                 }
 
-                if unsafe { (*entry_ptr).hash } != h1 {
+                let entry_ref = unsafe { &(*entry_ptr) };
+                if entry_ref.key.borrow() != key || entry_ref.hash != h1 {
                     // Entry does not match
                     probe.next(mask);
                     continue;
@@ -424,15 +481,16 @@ impl<K, V> DentTable<K, V> {
     pub(crate) fn insert(
         &self,
         key: K,
-        h1: usize,
-        h2: u8,
         value: V,
         _replace: bool,
         guard: &impl Guard,
     ) -> InsertResult<V>
     where
         V: Clone,
+        K: Eq + Hash,
+        S: BuildHasher + Clone,
     {
+        let (h1, h2) = self.hash(&key);
         let mut key = Some(key);
         let mut value = Some(value);
 
@@ -461,9 +519,11 @@ impl<K, V> DentTable<K, V> {
                 }
             } else if short_hash == h2 {
                 let v = value.unwrap();
-                match self.insert_replace(self.get_entry(probe.i), v, true, h1) {
+                let k = key.unwrap();
+                match self.insert_replace(self.get_entry(probe.i), &k, v, true, h1) {
                     InsertReplace::Failed { v } => {
                         value = Some(v);
+                        key = Some(k);
                         probe.next(mask);
                         continue;
                     }
@@ -517,19 +577,23 @@ impl<K, V> DentTable<K, V> {
     fn insert_replace(
         &self,
         slot: &AtomicPtr<TableEntry<K, V>>,
+        key: &K,
         value: V,
         replace: bool,
         h1: usize,
     ) -> InsertReplace<V>
     where
+        K: Eq,
         V: Clone,
     {
-        let slot_ptr = slot.load(Ordering::Acquire);
-        if slot_ptr.is_null() {
+        let entry_ptr = slot.load(Ordering::Acquire);
+        if entry_ptr.is_null() {
             // Another thread has removed the entry
             return InsertReplace::Failed { v: value };
         }
-        if unsafe { (*slot_ptr).hash } != h1 {
+
+        let entry_ref = unsafe { &(*entry_ptr) };
+        if entry_ref.key != *key || entry_ref.hash != h1 {
             return InsertReplace::Failed { v: value };
         };
         if !replace {
@@ -537,7 +601,7 @@ impl<K, V> DentTable<K, V> {
         }
 
         // We only need to replace the write target
-        let entry_ref = unsafe { &(*slot_ptr) };
+        let entry_ref = unsafe { &(*entry_ptr) };
         loop {
             let write_ptr = entry_ref.access[1].swap(std::ptr::null_mut(), Ordering::Relaxed); // Relaxed is probably not correct here
 
