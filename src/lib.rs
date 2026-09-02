@@ -3,7 +3,7 @@ use std::{
     hash::{BuildHasher, Hash, RandomState},
     marker::PhantomData,
     ops::{Deref, DerefMut},
-    sync::atomic::{AtomicPtr, Ordering},
+    sync::atomic::Ordering,
 };
 
 use seize::LocalGuard;
@@ -157,7 +157,7 @@ impl<'a, V> Drop for ReadGuard<'a, V> {
 pub struct WriteGuard<'a, K, V> {
     // We are the only owner of this pointer and data behind it
     write_ptr: *mut TrackingEntry<V>,
-    slot: &'a AtomicPtr<TableEntry<K, V>>,
+    slot: *mut TableEntry<K, V>, // TODO: Store *mut instead?
     _keep_alive: PhantomData<&'a ()>,
 }
 
@@ -187,11 +187,10 @@ impl<'a, K, V> DerefMut for WriteGuard<'a, K, V> {
 
 impl<'a, K, V> Drop for WriteGuard<'a, K, V> {
     fn drop(&mut self) {
-        // Guaranteed to be non-null for as long as we have write access
-        let slot_ptr = self.slot.load(Ordering::Acquire);
+        // self.slot is guaranteed to be non-null for as long as we have write access
         let old_read_ptr =
-            unsafe { &(*slot_ptr) }.access[0].swap(self.write_ptr, Ordering::Release);
-        unsafe { &(*slot_ptr) }.access[1].store(old_read_ptr, Ordering::Release);
+            unsafe { &(*self.slot) }.access[0].swap(self.write_ptr, Ordering::Release);
+        unsafe { &(*self.slot) }.access[1].store(old_read_ptr, Ordering::Release);
     }
 }
 

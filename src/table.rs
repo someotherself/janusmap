@@ -403,7 +403,7 @@ impl<K, V, S> DentTable<K, V, S> {
 
                 return Some(WriteGuard {
                     write_ptr,
-                    slot,
+                    slot: entry_ptr,
                     _keep_alive: PhantomData,
                 });
             } else if short_hash == 0 {
