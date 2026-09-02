@@ -178,6 +178,13 @@ impl<K, V> DentTable<K, V> {
         table
     }
 
+    /// Returns a reference to the root hash-table.
+    #[inline]
+    fn root(&self, guard: &impl Guard) -> *mut RawTable<K, V> {
+        // Load the root table.
+        guard.protect(&self.inner, Ordering::Acquire)
+    }
+
     #[inline]
     fn layout(cap: usize) -> (Layout, usize, usize) {
         let header = Layout::new::<RawTable<K, V>>();
@@ -195,21 +202,22 @@ impl<K, V> DentTable<K, V> {
     where
         V: Clone,
     {
-        let mut probe = Probe::start(h1, self.mask());
+        let table = self.root(guard);
+        let mask = Self::mask(table);
+        let mut probe = Probe::start(h1, mask);
 
         loop {
-            let short_hash = self.get_short_hash(probe.i).load(Ordering::Acquire);
+            let short_hash = Self::short_hash(table, probe.i);
 
             if short_hash == h2 {
                 match self.remove_entry(self.get_entry(probe.i), h1, guard) {
                     Some(val) => {
                         self.len.fetch_sub(1, Ordering::Relaxed);
-                        self.get_short_hash(probe.i)
-                            .store(hash_metadata::TOMBSTONE_SLOT, Ordering::Relaxed);
+                        Self::store_short_hash(table, probe.i, hash_metadata::TOMBSTONE_SLOT);
                         return Some(val);
                     }
                     None => {
-                        probe.next(self.mask());
+                        probe.next(mask);
                         continue;
                     }
                 }
@@ -218,7 +226,7 @@ impl<K, V> DentTable<K, V> {
             } else {
                 // slot is occupied by another entry
                 // keep probing
-                probe.next(self.mask());
+                probe.next(mask);
                 continue;
             }
         }
@@ -291,10 +299,11 @@ impl<K, V> DentTable<K, V> {
         h2: u8,
         guard: &'g LocalGuard<'_>,
     ) -> Option<WriteGuard<'g, K, V>> {
-        let mut probe = Probe::start(h1, self.mask());
+        let table = self.root(guard);
 
+        let mut probe = Probe::start(h1, Self::mask(table));
         loop {
-            let short_hash = self.get_short_hash(probe.i).load(Ordering::Acquire);
+            let short_hash = Self::short_hash(table, probe.i);
 
             if short_hash == h2 {
                 let slot = self.get_entry(probe.i);
@@ -303,13 +312,13 @@ impl<K, V> DentTable<K, V> {
 
                 if entry_ptr.is_null() {
                     // Entry was removed by another thread
-                    probe.next(self.mask());
+                    probe.next(Self::mask(table));
                     continue;
                 }
 
                 if unsafe { (*entry_ptr).hash } != h1 {
                     // Entry does not match
-                    probe.next(self.mask());
+                    probe.next(Self::mask(table));
                     continue;
                 }
 
@@ -353,7 +362,7 @@ impl<K, V> DentTable<K, V> {
             } else {
                 // slot is occupied by another entry
                 // keep probing
-                probe.next(self.mask());
+                probe.next(Self::mask(table));
                 continue;
             }
         }
@@ -366,10 +375,11 @@ impl<K, V> DentTable<K, V> {
         h2: u8,
         guard: &'g LocalGuard<'_>,
     ) -> Option<ReadGuard<'g, V>> {
-        let mut probe = Probe::start(h1, self.mask());
-
+        let table = self.root(guard);
+        let mask = Self::mask(table);
+        let mut probe = Probe::start(h1, mask);
         loop {
-            let short_hash = self.get_short_hash(probe.i).load(Ordering::Acquire);
+            let short_hash = Self::short_hash(table, probe.i);
 
             if short_hash == h2 {
                 let slot = self.get_entry(probe.i);
@@ -378,13 +388,13 @@ impl<K, V> DentTable<K, V> {
 
                 if entry_ptr.is_null() {
                     // Entry was removed by another thread
-                    probe.next(self.mask());
+                    probe.next(mask);
                     continue;
                 }
 
                 if unsafe { (*entry_ptr).hash } != h1 {
                     // Entry does not match
-                    probe.next(self.mask());
+                    probe.next(mask);
                     continue;
                 }
 
@@ -411,7 +421,7 @@ impl<K, V> DentTable<K, V> {
             } else {
                 // slot is occupied by another entry
                 // keep probing
-                probe.next(self.mask());
+                probe.next(mask);
                 continue;
             }
         }
@@ -425,27 +435,30 @@ impl<K, V> DentTable<K, V> {
         h2: u8,
         value: V,
         replace: bool,
+        guard: &impl Guard,
     ) -> InsertResult<V>
     where
         V: Clone,
     {
-        let mut probe = Probe::start(h1, self.mask());
-
         let mut key = Some(key);
         let mut value = Some(value);
 
+        let table = self.root(guard);
+        let mask = Self::mask(table);
+        let mut probe = Probe::start(h1, mask);
+
         loop {
-            let short_hash = self.get_short_hash(probe.i).load(Ordering::Acquire);
+            let short_hash = Self::short_hash(table, probe.i);
             if short_hash == 0 {
                 // slot is empty
                 // entry already exists
                 let k = key.unwrap();
                 let v = value.unwrap();
-                match self.insert_new(probe.i, k, v, h1, h2) {
+                match self.insert_new(probe.i, k, v, h1, h2, table) {
                     InsertNew::Found { k, v } => {
                         key = Some(k);
                         value = Some(v);
-                        probe.next(self.mask());
+                        probe.next(mask);
                         continue;
                     }
                     InsertNew::Inserted => {
@@ -458,7 +471,7 @@ impl<K, V> DentTable<K, V> {
                 match self.insert_replace(self.get_entry(probe.i), v, true, h1) {
                     InsertReplace::Failed { v } => {
                         value = Some(v);
-                        probe.next(self.mask());
+                        probe.next(mask);
                         continue;
                     }
                     InsertReplace::Replaced { value } => return InsertResult::Replaced(value),
@@ -467,14 +480,22 @@ impl<K, V> DentTable<K, V> {
             } else {
                 // slot is occupied by another entry
                 // keep probing
-                probe.next(self.mask());
+                probe.next(mask);
                 continue;
             }
         }
     }
 
     #[inline]
-    fn insert_new(&self, slot: usize, key: K, value: V, h1: usize, h2: u8) -> InsertNew<K, V>
+    fn insert_new(
+        &self,
+        slot: usize,
+        key: K,
+        value: V,
+        h1: usize,
+        h2: u8,
+        table: *mut RawTable<K, V>,
+    ) -> InsertNew<K, V>
     where
         V: Clone,
     {
@@ -488,7 +509,7 @@ impl<K, V> DentTable<K, V> {
             Ordering::Acquire,
         ) {
             Ok(_) => {
-                self.get_short_hash(slot).store(h2, Ordering::Release);
+                Self::store_short_hash(table, slot, h2);
                 InsertNew::Inserted
             }
             Err(_) => {
@@ -575,22 +596,20 @@ impl<K, V> DentTable<K, V> {
     }
 
     #[inline]
-    pub fn mask(&self) -> usize {
-        let ptr = self.inner.load(Ordering::Acquire);
-        unsafe { (*ptr).mask }
+    pub fn mask(ptr: *mut RawTable<K, V>) -> usize {
+        unsafe { (&*ptr).mask }
     }
 
     #[inline]
-    pub fn get_short_hash(&self, i: usize) -> &AtomicU8 {
-        let ptr = self.inner.load(Ordering::Acquire);
-        unsafe { &*self.short_hash_ptr(ptr).add(i) }
+    fn short_hash(ptr: *mut RawTable<K, V>, slot: usize) -> u8 {
+        let ptr = unsafe { ptr.cast::<u8>().add(size_of::<RawTable<K, V>>()) }.cast::<AtomicU8>();
+        unsafe { &(*ptr.add(slot)) }.load(Ordering::Acquire)
     }
 
     #[inline]
-    fn short_hash_ptr(&self, ptr: *mut RawTable<K, V>) -> *mut AtomicU8 {
-        let capacity = unsafe { (*ptr).mask + 1 };
-        let (_, short_hash_offset, _) = Self::layout(capacity);
-        unsafe { ptr.cast::<u8>().add(short_hash_offset) }.cast::<AtomicU8>()
+    fn store_short_hash(ptr: *mut RawTable<K, V>, slot: usize, h2: u8) {
+        let ptr = unsafe { ptr.cast::<u8>().add(size_of::<RawTable<K, V>>()) }.cast::<AtomicU8>();
+        unsafe { &(*ptr.add(slot)) }.store(h2, Ordering::Release);
     }
 }
 

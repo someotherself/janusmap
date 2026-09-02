@@ -106,9 +106,9 @@ impl<K: Eq + Hash, V: Clone, S: BuildHasher + Clone> JanusMap<K, V, S> {
         self.base.len.load(Ordering::Relaxed) == 0
     }
 
-    pub fn insert(&self, key: K, value: V) -> Option<V> {
+    pub fn insert(&self, key: K, value: V, guard: &LocalGuard<'_>) -> Option<V> {
         let (h1, h2) = self.hash(&key);
-        match self.base.insert(key, h1, h2, value, true) {
+        match self.base.insert(key, h1, h2, value, true, guard) {
             InsertResult::Inserted => None,
             InsertResult::Replaced(val) => Some(val),
             InsertResult::Error => {
@@ -239,9 +239,9 @@ mod test {
     fn basic_test() {
         let map = JanusMap::<u64, String>::with_capacity(16);
         let guard = map.guard();
-        map.insert(1, "aaa".into());
+        map.insert(1, "aaa".into(), &guard);
         println!("map len: {}", map.len());
-        if let Some(old) = map.insert(1, "bbb".into()) {
+        if let Some(old) = map.insert(1, "bbb".into(), &guard) {
             eprintln!("Old value: {old}")
         }
         println!("map len: {}", map.len());
