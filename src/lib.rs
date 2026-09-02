@@ -191,7 +191,7 @@ impl<'a, K, V> Drop for WriteGuard<'a, K, V> {
         let slot_ptr = self.slot.load(Ordering::Acquire);
         let old_read_ptr =
             unsafe { &(*slot_ptr) }.access[0].swap(self.write_ptr, Ordering::Release);
-        unsafe { &(*slot_ptr) }.access[1].swap(old_read_ptr, Ordering::Release);
+        unsafe { &(*slot_ptr) }.access[1].store(old_read_ptr, Ordering::Release);
     }
 }
 
