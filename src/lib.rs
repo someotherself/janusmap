@@ -178,7 +178,7 @@ pub struct ReadGuard<'a, V> {
 
 impl<'a, V> ReadGuard<'a, V> {
     fn as_ref(&self) -> &V {
-        &unsafe { &mut (*self.entry) }.target
+        &unsafe { &(*self.entry) }.target
     }
 }
 
@@ -210,7 +210,7 @@ pub struct WriteGuard<'a, K, V> {
 
 impl<'a, K, V> WriteGuard<'a, K, V> {
     fn as_ref(&self) -> &V {
-        &unsafe { &mut (*self.write_ptr) }.target
+        &unsafe { &(*self.write_ptr) }.target
     }
 
     fn as_mut_ref(&mut self) -> &mut V {
