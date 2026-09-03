@@ -6,9 +6,9 @@ use std::{
     sync::atomic::Ordering,
 };
 
-use seize::LocalGuard;
-
 use crate::table::{DentTable, InsertResult, TableEntry, TrackingEntry};
+
+pub use seize::{Guard, LocalGuard, OwnedGuard};
 
 pub(crate) mod probe;
 pub(crate) mod table;
